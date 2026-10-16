@@ -196,6 +196,10 @@ test("MVP7 preenche as colunas da fila no vocabulário da planilha", async () =>
   // Fechada e gravada antes da migração da fila: é preenchida de novo uma vez.
   expect("C4", { status_reclamacao: "closed", status_retorno: "Encerrado — reembolsado ao comprador", acao_pendente: "Nenhuma — caso encerrado", resultado: "A favor do comprador", sku: "SKU4", quantidade: 2, valor_venda: 200 });
   expect("C5", { etapa_ml: "Mediação", status_retorno: "Em análise pelo ML", acao_pendente: "Responder ao ML na mediação" });
+  // Códigos vistos na API real em 16/10 (recontact, return_review_unified_*).
+  assert.match(syncCode, /recontact: 'Responder ao recontato do caso'/);
+  assert.match(syncCode, /return_review_unified_ok: 'Revisar o produto e informar ao ML'/);
+  assert.match(syncCode, /no_testable: 'Não testável'/);
   expect("C6", { status_retorno: "Revisado — a caminho do vendedor", destino_retorno: "Vendedor", rastreio: "TRK6B", acao_pendente: "Nenhuma — aguardar chegada", data_prevista: iso(histories.S6b.date_history.date_delivered_estimated) });
   assert.equal(calls["ml:claim_detail"], 1, "detalhe só para a aberta sem participantes");
   // Só o apelido do comprador: nunca nome ou sobrenome.
