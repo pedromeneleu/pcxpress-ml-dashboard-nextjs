@@ -2,100 +2,77 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Full project documentation (pt-BR) lives in [`docs/`](docs/README.md)** — architecture, every
+Supabase table/view, every n8n workflow and its run history, each dashboard tab and metric, the
+Devoluções feature, project history, roadmap and runbook. Read `docs/README.md` first; read the
+doc for the area you are about to change.
+
 ## What this is
 
-PCXpress Mercado Livre Analytics — a Next.js (App Router) dashboard that reads pre-aggregated
-seller/sales data from Supabase (Postgres) server-side and renders it in a single-page client
-dashboard. The whole product is essentially two files: `lib/supabase-dashboard.ts` (data layer)
-and `app/page.tsx` (the entire UI).
+PCXpress Mercado Livre Analytics — a Next.js (App Router) dashboard for the PCXpress store on
+Mercado Livre, built by Aruna Data. n8n workflows pull the Mercado Livre API and upsert into a
+self-hosted Supabase (schema `ml_dashboards`); the dashboard reads Supabase server-side and renders
+one client page. Deployed on Vercel.
 
 ## Commands
 
 ```bash
-pnpm install --frozen-lockfile   # install deps (pnpm 11.9.0, Node 22.13–24)
-pnpm run dev                     # dev server, http://localhost:3000 (webpack, not turbopack)
+pnpm install --frozen-lockfile   # pnpm 11.9.0, Node 22.13–24
+pnpm run dev                     # http://localhost:3000 (webpack, not turbopack)
 pnpm run build                   # production build (webpack)
-pnpm run start                   # run the production build
-pnpm run lint                    # eslint . (flat config, eslint-config-next core-web-vitals + typescript)
+pnpm run lint                    # eslint . (flat config, next core-web-vitals + typescript)
 pnpm run test                    # node --test tests/*.test.mjs
-pnpm run check                   # lint && test && build — run this before considering work done
+pnpm run check                   # lint && test && build
+node --test tests/returns.test.mjs --test-name-pattern="<substring>"   # single file / case
 ```
 
-There's no test runner flag for a single file/case since there's only one test file
-(`tests/project.test.mjs`); use `node --test tests/project.test.mjs` directly, optionally with
-`--test-name-pattern="<substring>"` to run a single `test(...)` block.
-
-Local env vars go in `.env.local` (not committed):
-
-```dotenv
-SUPABASE_URL=https://SEU-PROJETO.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=SUA_CHAVE_SERVICE_ROLE
-SUPABASE_SCHEMA=ml_dashboards
-SUPABASE_ACCOUNT_NAME=PC Express
-```
-
-Without these set, the API route falls back to `FALLBACK_DASHBOARD_DATA` (see below) instead of
-failing — the app is always renderable.
+Local env: copy `.env.example` to `.env.local` (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+`SUPABASE_SCHEMA=ml_dashboards`, `SUPABASE_ACCOUNT_NAME=PC Express`; optional `RETURNS_DEMO_MODE`,
+`LOGISTICS_V2_ENABLED`). Without them the API returns `FALLBACK_DASHBOARD_DATA` — the app always renders.
 
 ## Architecture
 
-**Data flow:** `app/page.tsx` (client component) fetches `GET /api/dashboard` →
-`app/api/dashboard/route.ts` (Next Route Handler, `runtime = "nodejs"`, `dynamic = "force-dynamic"`)
-parses/validates query params → `lib/supabase-dashboard.ts#getDashboardData()` queries Supabase's
-PostgREST API directly over `fetch` (no `@supabase/supabase-js` client) using the service-role key
-→ returns a single `DashboardData` object (shape defined in `app/dashboard-types.ts`) that the
-client renders. The service-role key never reaches the browser — it's read only in
-`lib/supabase-dashboard.ts`, which is server-only code.
+- **Main dashboard:** `app/page.tsx` (client, ~3k lines, every tab) → `GET /api/dashboard`
+  (`app/api/dashboard/route.ts`, validates params, max 366-day ranges) →
+  `lib/supabase-dashboard.ts#getDashboardData()` → PostgREST over `fetch` (no supabase-js) with the
+  service-role key and `accept-profile: ml_dashboards`. Contract in `app/dashboard-types.ts`
+  (mirror any shape change in `FALLBACK_DASHBOARD_DATA`).
+- **Devoluções (returns):** `app/returns/ReturnsView.tsx` → `GET /api/returns` →
+  `lib/supabase-returns.ts` (tables `devolucoes*`, view `devolucoes_base_vendas_diaria`). Pure
+  calculations in `app/returns/returns-metrics.ts`; **all business thresholds in
+  `app/returns/returns-config.ts`** (provisional values). Demo data in `lib/returns-demo-data.ts`,
+  shown per `resolveDemoMode`/`shouldShowDemo` (production: only while no real data exists; read
+  errors never become demo data).
+- **Logistics tab is retired** (removed from the menu on 2026-10-05; queries disabled by
+  `const logisticsEnabled = false` in `getDashboardData`). The code and `logistics*` types remain;
+  don't build on it without the decision in `docs/07-roadmap.md`.
+- **Dates:** `resolveDateSelection()` anchors 7/30/90-day presets on the latest
+  `performance_date` (not today). Comparison modes: `previousPeriod`, `previousMonthEquivalent`,
+  `previousMonthFull`, `custom`, `none`. One combined `or=(and(...),and(...))` query per view, split
+  in memory with `inRange`.
+- **Optional sources:** use `optionalFetchAll` / `optionalFetchAllWithAvailability` for views that
+  may not exist in every environment.
+- **Ingestion (n8n):** source of truth is the n8n instance. Sanitized copies (keys replaced by
+  `PREENCHA_…`) in `ingestao/n8n/`: `ML_Dashboards_Sync_Diario.json` (MVP1–4) and
+  `MVP7_Devolucoes.json` (returns). `tests/ingestao-mvp7.test.mjs` executes the MVP7 node code
+  against fake ML/Supabase; `tests/ingestao-n8n.test.mjs` fails if any copy contains keys. Never
+  commit real keys.
+- **Migrations:** only the Devoluções DDL is versioned (`supabase/migrations/`). The other tables
+  and `dashboard_*` views were created directly in Supabase — see `docs/02-supabase.md`.
 
-**No ORM/SDK for Supabase.** `supabaseFetch()` hits `${SUPABASE_URL}/rest/v1/<path>` with
-`apikey`/`authorization` headers and `accept-profile`/`content-profile: SUPABASE_SCHEMA` headers
-(defaults to schema `ml_dashboards`) to select the exposed Postgres schema. `fetchAll()` paginates
-with the PostgREST `range` header in pages of 1000. `optionalFetchAll()` swallows errors for views
-that may not exist yet in a given environment (e.g. Seller-health views), returning `[]` instead of
-failing the whole request — new views should probably follow this pattern until they're guaranteed
-present in production.
+## Rules the code follows
 
-**Views consumed from Supabase** (all under the `ml_dashboards` schema): `accounts`,
-`dashboard_item_catalog`, `dashboard_daily_account_summary`, `dashboard_daily_item_performance`,
-`sellers_current`, `seller_daily_snapshots`, `dashboard_daily_order_impact`. Row shapes (snake_case,
-matching Postgres) are declared as private `*Record` types in `lib/supabase-dashboard.ts` and mapped
-into camelCase domain types exported from `app/dashboard-types.ts`.
+- UI copy in Brazilian Portuguese. Money always full BRL via `Intl.NumberFormat` (no "mil"/"mi").
+- Conversion = orders / visits × 100 (not units); ticket médio = gross / orders; units per order =
+  units / orders. Percentages and averages are computed on read, never stored.
+- Missing data shows as "Sem dados"/"—"/"não informado", never a fake zero.
+- `SUPABASE_SERVICE_ROLE_KEY` is server-only (never `NEXT_PUBLIC_`, never in client code).
+- Color = judgment, not decoration: `app/metric-signals.ts` (currently used only by Devoluções; see roadmap).
 
-**Date-range/comparison model:** all metrics are computed for a "current" window and, optionally, a
-"comparison" window, resolved by `resolveDateSelection()`. Comparison mode is one of
-`previousPeriod` | `previousMonthEquivalent` | `previousMonthFull` | `custom` | `none`
-(`ComparisonMode` type). The route handler validates raw date query params (`isIsoDate`,
-`validateRange`, max 366-day range) before calling into the data layer, which computes the actual
-start/end dates and issues a single combined Supabase query (`or: (and(...),and(...))`) covering
-both windows, then splits results in-memory by date range (`inRange` filter) rather than issuing two
-round trips.
+## Known test failures
 
-**Fallback data:** `FALLBACK_DASHBOARD_DATA` in `app/dashboard-types.ts` is the canonical shape used
-both when Supabase env vars are missing/invalid (`readConfig()` returns `null`) and as the client's
-initial `useState` before the first fetch resolves. Any change to `DashboardData`'s shape should be
-mirrored in this fallback object or the client will break on first paint.
-
-**Metric formulas** (also enforced by tests, see below): conversion = `pedidos / visitas * 100`
-(orders/visits, **not** units/visits); ticket médio = `valor bruto / pedidos`; unidades por pedido =
-`unidades vendidas / pedidos`. Monetary values are always rendered in full (`Intl.NumberFormat`
-currency `BRL`) — no abbreviated "mi"/"mil" formatting.
-
-**`app/page.tsx`** is one large client component containing every dashboard view (Overview, Sales,
-Products, Performance, Traffic, Seller — see `ViewId`/`navItems`), plus shared chart/table/formatting
-helpers (`PeriodComparisonChart`, `ComparisonIndicator`, `KpiCard`, `TopProductsTable`,
-`ProductComparisonTable`, `CancellationTrend`, etc.). The SVG line chart in
-`PeriodComparisonChart`/`buildChartPath` is hand-rolled (no charting library). All UI copy is in
-Brazilian Portuguese (pt-BR) — match that when adding UI strings.
-
-**Deployment:** targets Vercel with zero custom config (no `vercel.json`) — Next.js's native App
-Router detection turns `app/api/dashboard/route.ts` into a serverless function automatically. Root
-directory must contain `package.json` directly (don't nest it).
-
-## Known repo gap
-
-`tests/project.test.mjs` and `README.md` reference `.env.example`, `supabase-seller-health-cancellations.sql`,
-and a `docs/` folder that are **not present** in this repository (not in `git ls-files`). As a
-result, `pnpm run test` currently fails at runtime (`ENOENT`) on the tests that `readFile` those
-paths. Be aware of this when running `pnpm run check` — a failure there may be this pre-existing gap
-rather than something introduced by your change. If you're asked to fix the test suite itself, either
-recreate those files (matching what the tests assert about their contents) or adjust the tests.
+3 tests in `tests/project.test.mjs` fail with `ENOENT`: they read SQL scripts that were never
+committed and lived one folder above the repo root (`supabase-seller-health-cancellations.sql`,
+`supabase-logistics-shipment-reconciliation-v5.sql`,
+`supabase-check-logistics-shipment-reconciliation-v5.sql`). Not a regression; fixing it is roadmap
+item 8 in `docs/07-roadmap.md`.
